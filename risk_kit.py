@@ -38,36 +38,61 @@ def get_hfi_returns():
     return hfi
 
 # Function to load the Ken French 30 Industry Portfolios Value Weighted Monthly Returns
-def get_ind_returns():
+def get_ind_file(filetype, weighting="vw", n_inds=30):
     """
-    Load and format the Ken French 30 Industry Portfolios Value Weighted Monthly Returns
-    """
-    path = "C:\Python projects\Finance\Jupyter notebooks and Python files\data\ind30_m_vw_rets.csv"
-    ind = pd.read_csv(path, index_col=0, header=0, parse_dates=True)
-    ind = ind/100
-    ind.index = pd.to_datetime(ind.index, format='%Y%m').to_period(freq='M')
+    Load and format the Ken French Industry Portfolios files
+    Variant is a tuple of (weighting, size) where:
+        weighting is one of "ew", "vw"
+        number of inds is 30 or 49
+    """    
+    if filetype is "returns":
+        name = f"{weighting}_rets" 
+        divisor = 100
+    elif filetype is "nfirms":
+        name = "nfirms"
+        divisor = 1
+    elif filetype is "size":
+        name = "size"
+        divisor = 1
+    else:
+        raise ValueError(f"filetype must be one of: returns, nfirms, size")
+    
+    ind = pd.read_csv(f"Jupyter notebooks and Python files/data/ind{n_inds}_m_{name}.csv", header=0, index_col=0, na_values=-99.99)/divisor
+    ind.index = pd.to_datetime(ind.index, format="%Y%m").to_period('M')
     ind.columns = ind.columns.str.strip()
     return ind
 
-def get_ind_nfirms():
+def get_ind_returns(weighting="vw", n_inds=30):
     """
-    Load and format the Ken French 30 Industry Portfolios number of firms
+    Load and format the Ken French Industry Portfolios Monthly Returns
     """
-    path = "C:\Python projects\Finance\Jupyter notebooks and Python files\data\ind30_m_nfirms.csv"
-    ind = pd.read_csv(path, index_col=0, header=0, parse_dates=True)
-    ind.index = pd.to_datetime(ind.index, format='%Y%m').to_period(freq='M')
-    ind.columns = ind.columns.str.strip()
-    return ind
+    return get_ind_file("returns", weighting=weighting, n_inds=n_inds)
 
-def get_ind_size():
+def get_ind_nfirms(n_inds=30):
     """
-    Load and format the Ken French 30 Industry Portfolios average firm size
+    Load and format the Ken French 30 Industry Portfolios Average number of Firms
     """
-    path = "C:\Python projects\Finance\Jupyter notebooks and Python files\data\ind30_m_size.csv"
-    ind = pd.read_csv(path, index_col=0, header=0, parse_dates=True)
-    ind.index = pd.to_datetime(ind.index, format='%Y%m').to_period(freq='M')
-    ind.columns = ind.columns.str.strip()
-    return ind
+    return get_ind_file("nfirms", n_inds=n_inds)
+
+def get_ind_size(n_inds=30):
+    """
+    Load and format the Ken French 30 Industry Portfolios Average size (market cap)
+    """
+    return get_ind_file("size", n_inds=n_inds)
+
+def get_ind_market_caps(n_inds=30, weights=False):
+    """
+    Load the industry portfolio data and derive the market caps
+    """
+    ind_nfirms = get_ind_nfirms(n_inds=n_inds)
+    ind_size = get_ind_size(n_inds=n_inds)
+    ind_mktcap = ind_nfirms * ind_size
+    if weights:
+        total_mktcap = ind_mktcap.sum(axis=1)
+        ind_capweight = ind_mktcap.divide(total_mktcap, axis="rows")
+        return ind_capweight
+    #else
+    return ind_mktcap
 
 def get_total_market_index_returns():
     """
@@ -82,6 +107,14 @@ def get_total_market_index_returns():
     total_market_return = (ind_capweight*ind_return).sum(axis='columns')
     # total_market_index = drawdown(total_market_return)['Wealth']
     return total_market_return
+
+def get_fff_returns():
+    path = "C:\Python projects\Finance\Jupyter notebooks and Python files\data\F-F_Research_Data_Factors_m.CSV"
+    ind = pd.read_csv(path, index_col=0, header=0, parse_dates=True)
+    ind = ind/100
+    ind.index = pd.to_datetime(ind.index, format='%Y%m').to_period(freq='M')
+    ind.columns = ind.columns.str.strip()
+    return ind
 
 # Drawdown function
 def drawdown(return_series: pd.Series):
@@ -151,6 +184,12 @@ def is_normal(return_series, level=0.01):
 """
 ********** SOME MATH TRANSFORMATIONS **********
 """
+def compound(return_series):
+    """
+    Returns the compound returns of a series of returns
+    """
+    return (1 + return_series).prod() - 1
+
 def annualize_vol(return_series, periods_per_year = 12):
     """
     Annualizes the vol of a set of returns
@@ -174,6 +213,30 @@ def sharpe_ratio(return_series, riskfree_rate, periods_per_year = 12):
     annualized_returns = annualize_returns(excess_rets, periods_per_year=periods_per_year)
     annualized_vol = annualize_vol(excess_rets, periods_per_year=periods_per_year)
     return annualized_returns/annualized_vol
+
+def weight_ew(r, cap_weights=None, max_cw_mult=None, microcap_threshold=None, **kwargs):
+    """
+    Returns the weights of the equally weighted portfolio on the asset returns "r" as a DataFrame
+    """
+    n = len(r.columns)
+    ew = pd.Series(1/n, index=r.columns)
+    if cap_weights is not None:
+        cw = cap_weights.loc[r.index[0]]    # Starting cap weight
+        ## exclude microcaps
+        if microcap_threshold is not None and microcap_threshold > 0:
+            microcap = cw < microcap_threshold
+            ew[microcap] = 0
+            ew = ew/ew.sum()
+        if max_cw_mult is not None:
+            cw = np.minimum(cw, max_cw_mult*ew)
+            ew = ew/ew.sum()
+    return ew
+
+def weight_cw(r, cap_weights, **kwargs):
+    """
+    Returns the weights of the cap-weighted portfolio on the asset returns "r" as a DataFrame
+    """
+    return cap_weights.loc[r.index[0]]
 
 """
 ********** EXTREME RISK CALCULATION METHODS **********
@@ -230,8 +293,37 @@ def var_gaussian(return_series, level=5, modified=False):
     return -(return_series.mean() + z*return_series.std(ddof=0))
 
 """
-********** ASSET EFFICIENT FRONTIER **********
+********** COVARIANCE ESTIMATORS **********
 """
+# Function to calculate the sample covariance of the supplied returns
+def sample_cov(r, **kwargs):
+    """
+    Returns the sample covariance of the supplied returns.
+    """
+    return r.cov()
+
+# Function to estimate a covariance matrix by using the Elton/Gruber Constant Correlation model
+def cc_cov(r, **kwargs):
+    """
+    Estimates a covariance matrix by using the Elton/Gruber Constant Correlation model
+    """
+    rhos = r.corr()
+    n = rhos.shape[0]
+    # this is a symmetric matrix with diagonals all 1 - so the mean correlation is ...
+    rho_bar = (rhos.values.sum()-n)/(n*(n-1))
+    ccor = np.full_like(rhos, rho_bar)
+    np.fill_diagonal(ccor, 1.)
+    sd = r.std()
+    return pd.DataFrame(ccor * np.outer(sd, sd), index=r.columns, columns=r.columns)
+
+def shrinkage_cov(r, delta=0.5, **kwargs):
+    """
+    Covariance estimator that shrinks between the Sample Covariance and the Constant Correlation Estimators
+    """
+    prior = cc_cov(r, **kwargs)
+    sample = sample_cov(r, **kwargs)
+    return delta*prior + (1-delta)*sample
+
 def returns_covmat_validation(**kwargs):
     """
     Returns the appropriate returns and covariance matrix based on the inputs received
@@ -251,6 +343,9 @@ def returns_covmat_validation(**kwargs):
         covmat = return_series.cov()
     return returns, covmat
 
+"""
+********** ASSET EFFICIENT FRONTIER **********
+"""
 # Function to calculate the expected return of a combination of portfolios based on a given set of weights
 def portfolio_return(weights, return_series):
     """
@@ -320,7 +415,7 @@ def msr(riskfree_rate, **kwargs):
     periods_per_year: an integer for the number of periods per year for returns annualization\n
     """
     returns, covmat = returns_covmat_validation(**kwargs)
-    n = len(returns)
+    n = returns.shape[0]
     init_guess = np.repeat(1/n, n)
     bounds = ((0.0, 1.0),)*n
     weights_sum_to_1 = {
@@ -336,6 +431,41 @@ def msr(riskfree_rate, **kwargs):
         return -(ret - riskfree_rate)/vol
     results = minimize(neg_sharpe_ratio, init_guess,
                        args = (riskfree_rate, returns, covmat), method = 'SLSQP',
+                       options = {'disp': False},
+                       constraints = (weights_sum_to_1),
+                       bounds=bounds
+                       )
+    return results.x
+
+# Define a function to find the combination with the highest Sharpe-Ratio, with a few adjustments
+def msr_tuned(riskfree_rate, min_weight=0.0, **kwargs):
+    """
+    Returns the Sharpe-ratio maximizing portfolio, with a parameter to set a minimum acceptable weight:\n
+    RiskFree rate + Returns + Covariance -> W\n
+    Possible data inputs:\n
+    return_series: a dataframe with 2 columns, each corresponding to an asset\n
+    returns: an array of length 2 with returns for 2 assets\n
+    covmat: a covariance matrix of shape 2 by 2 for 2 assets\n
+    periods_per_year: an integer for the number of periods per year for returns annualization\n
+    """
+    returns, covmat = returns_covmat_validation(**kwargs)
+    n = returns.shape[0]
+    init_guess = np.repeat(1/n, n)
+    bounds = ((min_weight, 1.0),)*n
+    weights_sum_to_1 = {
+        'type': 'eq',
+        'fun': lambda weights: np.sum(weights) - 1
+    }
+    def neg_sharpe_ratio(weights, riskfree_rate, returns, covmat):
+        """
+        Calculates the negative of the Sharpe-Ratio for a given combination of returns, covariances and weights.
+        """
+        ret = portfolio_return(weights, returns)
+        vol = portfolio_vol(weights, covmat)
+        return -(ret - riskfree_rate)/vol
+    results = minimize(neg_sharpe_ratio, init_guess,
+                       args = (riskfree_rate, returns, covmat),
+                       method = 'SLSQP',
                        options = {'disp': False},
                        constraints = (weights_sum_to_1),
                        bounds=bounds
@@ -407,6 +537,14 @@ def plot_ef(n_points, style = '.-', show_cml=False, show_ew=False, show_gmv=Fals
         ax.plot(volatility_gmv, returns_gmv, color='purple', marker='o', label='Global Minimum Volatility')
     ax.legend()
     return ax
+
+# Function to find the weights of the GMV portfolio given a covariance matrix of the returns
+def weight_gmv(r, cov_estimator=sample_cov, **kwargs):
+    """
+    Produces the weights of the GMV portfolio given a covariance matrix of the returns
+    """
+    est_cov = cov_estimator(r, **kwargs)
+    return gmv(est_cov)
 
 """
 ********** CPPI (Constant Proportion Portfolio Insurance) **********
@@ -846,7 +984,58 @@ def terminal_stats(rets, floor=.8, cap=np.inf, name='Stats'):
     }, orient='index', columns=[name])
     return sum_stats
 
+"""
+********** FACTOR MODELS **********
+"""
+def tracking_error(r_a, r_b):
+    """
+    Returns the Tracking Error between two return series
+    """
+    return np.sqrt(((r_a - r_b)**2).sum())
 
+def portfolio_tracking_error(weights, ref_r, bb_r):
+    """
+    Returns the tracking error between the reference returns
+    and a portfolio of building block returns held with given weights.
+    """
+    return tracking_error(ref_r, (weights*bb_r).sum(axis=1))
+
+def sharpe_style_analysis(dependent_variable, explanatory_variables):
+    """
+    Returns the optimal weights that minimize Tracking error between a portfolio
+    of the explanatory variables and the dependent variable
+    """
+    n = explanatory_variables.shape[1]
+    init_guess = np.repeat(1/n, n)
+    bounds = ((0.0, 1.0), ) * n # an N-tuple of 2-tuples!
+    # construct the constraints
+    weights_sum_to_1 = {'type': 'eq',
+                        'fun': lambda weights: np.sum(weights) - 1
+                        }
+    solution = minimize(portfolio_tracking_error, init_guess,
+                        args=(dependent_variable, explanatory_variables,), method='SLSQP',
+                        options={'disp': False},
+                        constraints=(weights_sum_to_1,),
+                        bounds=bounds)
+    weights = pd.Series(solution.x, index=explanatory_variables.columns)
+    return weights
+
+def backtest_ws(r, estimation_window=60, weighting=weight_ew, verbose=False, **kwargs):
+    """
+    Backtests a given weighting scheme, given some parameters:
+    r : asset returns to use to build the portfolio
+    estimation_window: the window to use to estimate parameters
+    weighting: the weighting scheme to use, must be a function that takes "r", and a variable number of keyword-value arguments
+    """
+    n_periods = r.shape[0]
+    # return windows
+    windows = [(start, start+estimation_window) for start in range(n_periods-estimation_window)]
+    weights = [weighting(r.iloc[win[0]:win[1]], **kwargs) for win in windows]
+    # convert List of weights to DataFrame
+    weights = pd.DataFrame(weights, index=r.iloc[estimation_window:].index, columns=r.columns)
+    returns = (weights * r).sum(axis="columns",  min_count=1) #mincount is to generate NAs if all inputs are NAs
+    return returns
+    
 
 """
 ********** TIME SERIES ANALYSIS **********
@@ -1074,13 +1263,14 @@ def plot_by_woe(data, x, y, rotation_of_x_axis_labels=0):
 """
 ********** TECHNICAL INDICATORS **********
 """
-def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_window=10, macd_params=[12, 26, 9], so_params=[14, 3], plot=True, return_df=True, periods_to_plot=0):
+def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_window=10, macd_params=[12, 26, 9], so_params=[14, 3], plot=True, return_df=True, periods_to_plot=0, signal_tolerance=1):
     """
     Function that calculates and plots technical indicators included in the <indicators> list object for the given series.\n
     <series> must be a pandas series.\n
     <time_window> indicates the size of the time window for each of the indicators.\n
     <periods_to_plot> can limit the number of periods plotted by the given number.\n
-    The <indicators> list object can include any of the following indicators:\n
+    <indicators> list object can include any of the following indicators:\n
+    <signal_tolerance> is a multiplier to the indicator value to determine the signal threshold.\n
     -SMA: Simple Moving Average\n
     -EMA: Exponential Moving Average\n
     -MACD: Moving Average Convergence Divergence\n
@@ -1098,7 +1288,7 @@ def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_w
             SMA.name = 'SMA'+str(i)
             indicators_list.append(SMA)
 
-            SMA_signals = series > SMA
+            SMA_signals = series > SMA*signal_tolerance
             SMA_signals.name = SMA.name + ' Signal'
             signals.append(SMA_signals)
 
@@ -1109,7 +1299,7 @@ def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_w
             EMA.name = 'EMA'+str(i)
             indicators_list.append(EMA)
 
-            EMA_signals = series > EMA
+            EMA_signals = series > EMA*signal_tolerance
             EMA_signals.name = EMA.name + ' Signal'
             signals.append(EMA_signals)
 
@@ -1123,7 +1313,7 @@ def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_w
         macd_series = pd.concat([MACD, signal_line], axis=1)
         macd_series.columns = [f'MACD ({macd_params[0]}, {macd_params[1]})', f'Signal line ({macd_params[2]})']
 
-        MACD_signals = MACD > signal_line
+        MACD_signals = MACD > signal_line*signal_tolerance
         MACD_signals.name = 'MACD Signal'
         signals.append(MACD_signals)
 
@@ -1136,7 +1326,7 @@ def technical_indicators(series, indicators=['SMA', 'EMA', 'MACD', 'SO'], time_w
         SO_series = pd.concat([pct_K, pct_D], axis=1)
         SO_series.columns = ['%K', '%D']
 
-        SO_signals = pct_K > pct_D
+        SO_signals = pct_K > pct_D*signal_tolerance
         SO_signals.name = 'Stochastic Oscillator Signal'
         signals.append(SO_signals)
 
