@@ -6,6 +6,7 @@ import datetime
 import os
 from scipy.stats import norm
 from scipy.optimize import minimize
+from numpy.linalg import inv
 
 """
 LOAD TEST DATASETS FUNCTIONS
@@ -45,13 +46,13 @@ def get_ind_file(filetype, weighting="vw", n_inds=30):
         weighting is one of "ew", "vw"
         number of inds is 30 or 49
     """    
-    if filetype is "returns":
+    if filetype == "returns":
         name = f"{weighting}_rets" 
         divisor = 100
-    elif filetype is "nfirms":
+    elif filetype == "nfirms":
         name = "nfirms"
         divisor = 1
-    elif filetype is "size":
+    elif filetype == "size":
         name = "size"
         divisor = 1
     else:
@@ -606,7 +607,7 @@ def run_cppi(risky_r, safe_r=None, m=3, start=1000, floor=0.8, riskfree_rate=0.0
     }
     return backtest_result
 
-def summary_stats(r, riskfree_rate=0.03, periods_per_year=12, level=5):
+def summary_stats(r, riskfree_rate=0.0, periods_per_year=12, level=5):
     """
     Return a dataframe that contains aggregated summary stats for the returns in the columns of r
     """
@@ -1036,6 +1037,164 @@ def backtest_ws(r, estimation_window=60, weighting=weight_ew, verbose=False, **k
     returns = (weights * r).sum(axis="columns",  min_count=1) #mincount is to generate NAs if all inputs are NAs
     return returns
     
+"""
+********** EXTRACTING EXPECTED RETURNS **********
+"""
+# Black Litterman implementation
+def as_colvec(x):
+    """
+    Takes a numpy array or a numpy one-column matrix (a vector)
+    and returns the data as a column vector.
+    """
+    if (x.ndim == 2):
+        return x
+    else:
+        return np.expand_dims(x, axis=1)
+    
+def implied_returns(delta, sigma, w):
+    """
+    Obtain the implied expected returns by reverse engineering the weights
+    Inputs:
+    delta: Risk Aversion Coefficient (scalar)
+    sigma: Variance-Covariance Matrix (N x N) as DataFrame
+        w: Portfolio weights (N x 1) as Series
+    Returns an N x 1 vector of Returns as Series
+    """
+    ir = delta * sigma.dot(w).squeeze() # to get a series from a 1-column dataframe
+    ir.name = 'Implied Returns'
+    return ir
+
+def proportional_prior(sigma, tau, p):
+    """
+    Returns the He-Litterman simplified Omega
+    Inputs:
+    sigma: N x N Covariance Matrix as DataFrame
+    tau: a scalar
+    p: a K x N DataFrame linking Q and Assets
+    returns a P x P DataFrame, a Matrix representing Prior Uncertainties
+    """
+    helit_omega = p.dot(tau * sigma).dot(p.T)
+    # Make a diag matrix from the diag elements of Omega
+    return pd.DataFrame(np.diag(np.diag(helit_omega.values)),index=p.index, columns=p.index)
+
+def bl(w_prior, sigma_prior, p, q,
+    omega=None,
+    delta=2.5, tau=.02):
+    """
+    # Computes the posterior expected returns based on 
+    # the original black litterman reference model
+    #
+    # W.prior must be an N x 1 vector of weights, a Series
+    # Sigma.prior is an N x N covariance matrix, a DataFrame
+    # P must be a K x N matrix linking Q and the Assets, a DataFrame
+    # Q must be an K x 1 vector of views, a Series
+    # Omega must be a K x K matrix a DataFrame, or None
+    # if Omega is None, we assume it is
+    #    proportional to variance of the prior
+    # delta and tau are scalars
+    """
+    if omega is None:
+        omega = proportional_prior(sigma_prior, tau, p)
+    # Force w.prior and Q to be column vectors
+    # How many assets do we have?
+    N = w_prior.shape[0]
+    # And how many views?
+    K = q.shape[0]
+    # First, reverse-engineer the weights to get pi
+    pi = implied_returns(delta, sigma_prior,  w_prior)
+    # Adjust (scale) Sigma by the uncertainty scaling factor
+    sigma_prior_scaled = tau * sigma_prior  
+    # posterior estimate of the mean, use the "Master Formula"
+    # we use the versions that do not require
+    # Omega to be inverted (see previous section)
+    # this is easier to read if we use '@' for matrixmult instead of .dot()
+    #     mu_bl = pi + sigma_prior_scaled @ p.T @ inv(p @ sigma_prior_scaled @ p.T + omega) @ (q - p @ pi)
+    mu_bl = pi + sigma_prior_scaled.dot(p.T).dot(inv(p.dot(sigma_prior_scaled).dot(p.T) + omega).dot(q - p.dot(pi).values))
+    # posterior estimate of uncertainty of mu.bl
+#     sigma_bl = sigma_prior + sigma_prior_scaled - sigma_prior_scaled @ p.T @ inv(p @ sigma_prior_scaled @ p.T + omega) @ p @ sigma_prior_scaled
+    sigma_bl = sigma_prior + sigma_prior_scaled - sigma_prior_scaled.dot(p.T).dot(inv(p.dot(sigma_prior_scaled).dot(p.T) + omega)).dot(p).dot(sigma_prior_scaled)
+    return (mu_bl, sigma_bl)
+
+def inverse(d):
+    """
+    Invert the dataframe by inverting the underlying matrix
+    """
+    return pd.DataFrame(inv(d.values), index=d.columns, columns=d.index)
+
+def w_msr(sigma, mu, scale=True):
+    """
+    Optimal (Tangent/Max Sharpe Ratio) Portfolio weights
+    by using the Markowitz Optimization Procedure
+    Mu is the vector of Excess expected Returns
+    Sigma must be an N x N matrix as a DataFrame and Mu a column vector as a Series
+    This implements page 188 Equation 5.2.28 of
+    "The econometrics of financial markets" Campbell, Lo and Mackinlay.
+    """
+    w = inverse(sigma).dot(mu)
+    if scale:
+        w = w/sum(w) # fix: this assumes all w is +ve
+    return w
+
+def w_star(delta, sigma, mu):
+    return (inverse(sigma).dot(mu))/delta
+
+"""
+********** RISK CONTRIBUTION & RISK PARITY **********
+"""
+def risk_contribution(w, cov):
+    """
+    Compute the contributions to risk of the constituents of a portfolio,
+    given a set of portfolio weights and a covariance matrix.
+    """
+    total_portfolio_var = portfolio_vol(w, cov)**2
+    # Marginal contribution of each constituent
+    marginal_contrib = cov@w
+    risk_contrib = np.multiply(marginal_contrib, w.T)/total_portfolio_var
+    return risk_contrib
+
+def target_risk_contributions(target_risk, cov):
+    """
+    Returns the weights of the portfolio that gives you the weights such
+    that the contributions to portfolio risk are as close as possible to
+    the target_risk, given the covariance matrix.
+    """
+    n = cov.shape[0]
+    init_guess = np.repeat(1/n, n)
+    bounds = ((0.0, 1.0),) * n #an N-tuple of 2-tuples!
+    # construct the constraints
+    weights_sum_to_1 = {'type': 'eq',
+                        'fun': lambda weights: np.sum(weights) - 1
+    }
+    def msd_risk(weights, target_risk, cov):
+        """
+        Returns the Mean Squared Differenced in risk contributions between weights and target_risk.
+        """
+        w_contribs = risk_contribution(weights, cov)
+        return ((w_contribs-target_risk)**2).sum()
+    
+    weights = minimize(msd_risk, init_guess,
+                       args=(target_risk, cov),
+                       method='SLSQP',
+                       options={'disp': False},
+                       constraints=(weights_sum_to_1,),
+                       bounds=bounds
+                       )
+    return weights.x
+
+def equal_risk_contributions(cov):
+    """
+    Returns the weights of the portfolio that equalizes the contributions
+    of the constituents based on the given covariance matrix.
+    """
+    n = cov.shape[0]
+    return target_risk_contributions(target_risk=np.repeat(1/n, n), cov=cov)
+
+def weight_erc(r, cov_estimator=sample_cov, **kwargs):
+    """
+    Produces the weights of the ERC portfolio given a covariance matrix of the returns
+    """
+    est_cov = cov_estimator(r, **kwargs)
+    return equal_risk_contributions(est_cov)
 
 """
 ********** TIME SERIES ANALYSIS **********
